@@ -515,44 +515,153 @@ async function fileToBase64(file){
   return new Promise((resolve,reject)=>{const r=new FileReader();r.onload=()=>resolve(r.result.split(',')[1]);r.onerror=reject;r.readAsDataURL(file);});
 }
 async function postBackend(payload){
-  if(!CONFIG.backendUrl){toast("Önce CONFIG.backendUrl alanına Google Apps Script adresini ekleyin.");return false;}
-  try{
-    const res=await fetch(CONFIG.backendUrl,{method:"POST",headers:{"Content-Type":"text/plain;charset=utf-8"},body:JSON.stringify(payload)});
-    const data=await res.json(); if(data.ok){toast("Gönderildi. Teşekkür ederiz.");return true;}
-    toast(data.message||"Gönderim sırasında hata oluştu."); return false;
-  }catch(e){toast("Sunucuya ulaşılamadı. İnternet bağlantısını ve backend adresini kontrol edin.");return false;}
+  if(!CONFIG.backendUrl){toast("Gönderilemedi: sunucu bağlantısı tanımlı değil.");return false;}
+
+  const token=(window.crypto&&crypto.randomUUID)?crypto.randomUUID():('nf_'+Date.now()+'_'+Math.random().toString(36).slice(2));
+  const frameName='nf_backend_'+token.replace(/[^a-zA-Z0-9_]/g,'');
+
+  return new Promise((resolve)=>{
+    let finished=false;
+    const iframe=document.createElement('iframe');
+    iframe.name=frameName;
+    iframe.title='';
+    iframe.setAttribute('aria-hidden','true');
+    iframe.style.cssText='position:fixed;width:1px;height:1px;opacity:0;border:0;pointer-events:none;left:-10px;top:-10px;';
+
+    const form=document.createElement('form');
+    form.method='POST';
+    form.action=CONFIG.backendUrl;
+    form.target=frameName;
+    form.enctype='application/x-www-form-urlencoded';
+    form.acceptCharset='UTF-8';
+    form.style.display='none';
+
+    const addField=(name,value)=>{
+      const field=document.createElement('textarea');
+      field.name=name;
+      field.value=value==null?'':String(value);
+      field.setAttribute('autocomplete','off');
+      form.appendChild(field);
+    };
+
+    addField('token',token);
+    Object.keys(payload||{}).forEach(k=>addField(k,payload[k]));
+
+    const finish=(ok,message)=>{
+      if(finished)return;
+      finished=true;
+      window.removeEventListener('message',onMessage);
+      clearTimeout(timer);
+      setTimeout(()=>{form.remove();iframe.remove();},250);
+      if(ok){
+        toast('✓ Gönderildi. Teşekkür ederiz.');
+      }else{
+        toast('Gönderilemedi: '+(message||'Sunucu işlemi tamamlayamadı.'));
+      }
+      resolve(!!ok);
+    };
+
+    const onMessage=(event)=>{
+      const d=event&&event.data;
+      if(!d||d.source!=='nazli-fatih-backend'||d.token!==token)return;
+      finish(!!d.ok,d.message||'');
+    };
+
+    window.addEventListener('message',onMessage);
+    document.body.appendChild(iframe);
+    document.body.appendChild(form);
+
+    const timer=setTimeout(()=>finish(false,'Sunucudan zamanında yanıt alınamadı. Lütfen tekrar deneyin.'),180000);
+
+    try{
+      form.submit();
+    }catch(e){
+      finish(false,'Gönderim başlatılamadı.');
+    }
+  });
 }
+
 async function submitMemory(type){
-  let file=null,name="";
-  if(type==="photo"){file=document.getElementById('photoCamera').files[0] || document.getElementById('photoUpload').files[0];name=document.getElementById('photoName').value;}
-  if(type==="video"){file=document.getElementById('videoCamera').files[0] || document.getElementById('videoUpload').files[0];name=document.getElementById('videoName').value;}
-  if(type==="audio"){file=document.getElementById('audioFile').files[0];name=document.getElementById('audioName').value;}
-  const payload={kind:"memory",type,name:name||"",text:""};
-  if(type==="note"){payload.text=document.getElementById('noteText').value;payload.name=document.getElementById('noteName').value||"";}
-  else {
-    if(!file){toast("Lütfen bir dosya seçin.");return;}
-    if(file.size>12*1024*1024){toast("Dosya 12 MB'den küçük olmalıdır.");return;}
-    payload.fileName=file.name;payload.mimeType=file.type;payload.base64=await fileToBase64(file);
+  let file=null,name='';
+  if(type==='photo'){file=document.getElementById('photoCamera').files[0] || document.getElementById('photoUpload').files[0];name=document.getElementById('photoName').value.trim();}
+  if(type==='video'){file=document.getElementById('videoCamera').files[0] || document.getElementById('videoUpload').files[0];name=document.getElementById('videoName').value.trim();}
+  if(type==='audio'){file=document.getElementById('audioFile').files[0];name=document.getElementById('audioName').value.trim();}
+
+  const payload={kind:'memory',type,name:name||'',text:''};
+  if(type==='note'){
+    payload.text=document.getElementById('noteText').value.trim();
+    payload.name=document.getElementById('noteName').value.trim();
+    if(!payload.text){toast('Lütfen hatıra notunuzu yazın.');return false;}
+  }else{
+    if(!file){toast('Lütfen bir dosya seçin.');return false;}
+    const maxBytes=25*1024*1024;
+    if(file.size>maxBytes){toast('Fotoğraf, video veya ses dosyası 25 MB veya daha küçük olmalıdır.');return false;}
+    payload.fileName=file.name;
+    payload.mimeType=file.type||'application/octet-stream';
+    try{
+      payload.base64=await fileToBase64(file);
+    }catch(e){
+      toast('Dosya okunamadı. Lütfen tekrar deneyin.');
+      return false;
+    }
   }
-  await postBackend(payload);
+
+  const buttons=document.querySelectorAll('.btn');
+  buttons.forEach(b=>{if((b.textContent||'').trim()==='Gönder'){b.dataset.oldText=b.textContent;b.disabled=true;b.textContent='Gönderiliyor…';}});
+  try{
+    return await postBackend(payload);
+  }finally{
+    buttons.forEach(b=>{if(b.dataset.oldText){b.disabled=false;b.textContent=b.dataset.oldText;delete b.dataset.oldText;}});
+  }
 }
-function sendRSVP(){
-  const name=document.getElementById('rsvpName').value.trim(), status=document.getElementById('rsvpStatus').value;
-  if(!name||!status){toast("İsim Soyisim ve katılım durumunu seçin.");return;}
-  if(!/^90\d{10}$/.test(CONFIG.whatsappNumber)){toast("WhatsApp numarasını CONFIG.whatsappNumber alanında tanımlayın.");return;}
-  const text=`Nazlı & Fatih Söz / Nişan%0Aİsim: ${encodeURIComponent(name)}%0AKatılım: ${encodeURIComponent(status)}%0ATarih: 10 Ekim 2026 18.00`;
-  window.open(`https://wa.me/${CONFIG.whatsappNumber}?text=${text}`,"_blank");
+
+function buildWhatsAppUrl(name,status){
+  const text=[
+    'Nazlı & Fatih Söz / Nişan',
+    'İsim: '+name,
+    'Katılım: '+status,
+    'Tarih: 10 Ekim 2026 18.00'
+  ].join('\n');
+  return 'https://wa.me/'+CONFIG.whatsappNumber+'?text='+encodeURIComponent(text);
 }
+
+async function sendRSVP(){
+  const name=document.getElementById('rsvpName').value.trim();
+  const status=document.getElementById('rsvpStatus').value;
+  if(!name||!status){toast('İsim Soyisim ve katılım durumunu seçin.');return false;}
+  if(!/^90\d{10}$/.test(CONFIG.whatsappNumber)){toast('WhatsApp numarası yapılandırması hatalı.');return false;}
+
+  // WhatsApp sekmesini kullanıcı tıklaması sırasında açmayı deniyoruz;
+  // tarayıcı açılır pencereyi engellerse işlem tamamlandıktan sonra aynı sekmeye gideriz.
+  const waUrl=buildWhatsAppUrl(name,status);
+  let waWindow=null;
+  try{waWindow=window.open('about:blank','_blank');}catch(_){waWindow=null;}
+
+  const ok=await postBackend({kind:'rsvp',name,status,event:'Nazlı & Fatih — 10 Ekim 2026 18.00'});
+  if(!ok){if(waWindow&&!waWindow.closed)waWindow.close();return false;}
+
+  if(waWindow&&!waWindow.closed){
+    waWindow.location.href=waUrl;
+  }else{
+    window.location.href=waUrl;
+  }
+  return true;
+}
+
 async function saveRSVP(){
-  const name=document.getElementById('rsvpName').value.trim(), status=document.getElementById('rsvpStatus').value;
-  if(!name||!status){toast("İsim Soyisim ve katılım durumunu seçin.");return;}
-  await postBackend({kind:"rsvp",name,status,event:"Nazlı & Fatih — 10 Ekim 2026 18.00"});
+  const name=document.getElementById('rsvpName').value.trim();
+  const status=document.getElementById('rsvpStatus').value;
+  if(!name||!status){toast('İsim Soyisim ve katılım durumunu seçin.');return false;}
+  return await postBackend({kind:'rsvp',name,status,event:'Nazlı & Fatih — 10 Ekim 2026 18.00'});
 }
+
 async function submitFinalNote(){
-  const name=document.getElementById('finalName').value.trim(), text=document.getElementById('finalNote').value.trim();
-  if(!text){toast("Hatıra notunuzu yazın.");return;}
-  await postBackend({kind:"note",name,text});
+  const name=document.getElementById('finalName').value.trim();
+  const text=document.getElementById('finalNote').value.trim();
+  if(!text){toast('Hatıra notunuzu yazın.');return false;}
+  return await postBackend({kind:'note',name,text});
 }
+
 async function loadWeather(){
   try{
     const geo=await fetch("https://geocoding-api.open-meteo.com/v1/search?name=Usak&count=1&language=tr&format=json").then(r=>r.json());
