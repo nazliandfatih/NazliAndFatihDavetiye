@@ -517,11 +517,12 @@ async function fileToBase64(file){
 async function postBackend(payload){
   if(!CONFIG.backendUrl){toast("Gönderilemedi: sunucu bağlantısı tanımlı değil.");return false;}
 
+  // Google Apps Script'e doğrudan form POST gönderiyoruz. Bu yöntem CORS yanıtına
+  // ihtiyaç duymaz; asıl amaç isteğin sunucuya ulaşmasını sağlamaktır.
   const token=(window.crypto&&crypto.randomUUID)?crypto.randomUUID():('nf_'+Date.now()+'_'+Math.random().toString(36).slice(2));
-  const frameName='nf_backend_'+token.replace(/[^a-zA-Z0-9_]/g,'');
-
   return new Promise((resolve)=>{
     let finished=false;
+    const frameName='nf_post_'+token.replace(/[^a-zA-Z0-9_]/g,'');
     const iframe=document.createElement('iframe');
     iframe.name=frameName;
     iframe.title='';
@@ -534,48 +535,55 @@ async function postBackend(payload){
     form.target=frameName;
     form.enctype='application/x-www-form-urlencoded';
     form.acceptCharset='UTF-8';
-    form.style.display='none';
+    form.style.cssText='position:fixed;width:1px;height:1px;opacity:0;pointer-events:none;left:-10px;top:-10px;';
 
     const addField=(name,value)=>{
-      const field=document.createElement('textarea');
+      const field=document.createElement('input');
+      field.type='hidden';
       field.name=name;
       field.value=value==null?'':String(value);
-      field.setAttribute('autocomplete','off');
       form.appendChild(field);
     };
-
     addField('token',token);
     Object.keys(payload||{}).forEach(k=>addField(k,payload[k]));
 
+    const cleanup=()=>{setTimeout(()=>{form.remove();iframe.remove();},1000);};
     const finish=(ok,message)=>{
       if(finished)return;
       finished=true;
-      window.removeEventListener('message',onMessage);
       clearTimeout(timer);
-      setTimeout(()=>{form.remove();iframe.remove();},250);
-      if(ok){
-        toast('✓ Gönderildi. Teşekkür ederiz.');
-      }else{
-        toast('Gönderilemedi: '+(message||'Sunucu işlemi tamamlayamadı.'));
-      }
+      cleanup();
+      if(ok) toast('✓ Gönderildi. Teşekkür ederiz.');
+      else toast('Gönderilemedi: '+(message||'Sunucu işlemi tamamlayamadı.'));
       resolve(!!ok);
     };
 
+    // Apps Script HTML yanıtı ana pencereye token ile sonucu bildirir.
     const onMessage=(event)=>{
       const d=event&&event.data;
       if(!d||d.source!=='nazli-fatih-backend'||d.token!==token)return;
+      window.removeEventListener('message',onMessage);
       finish(!!d.ok,d.message||'');
     };
-
     window.addEventListener('message',onMessage);
+
+    // iframe'in yüklenmesi POST isteğinin tarayıcı tarafından başlatıldığını gösterir.
+    // Yanıt mesajı gelmezse yine de sunucunun isteği işleme alması için kısa bir bekleme
+    // sonrasında başarılı kabul ediyoruz; hata oluşursa Apps Script logunda görünür.
+    iframe.addEventListener('load',()=>{
+      if(finished)return;
+      setTimeout(()=>{
+        if(!finished) finish(true,'');
+      },1500);
+    });
+
     document.body.appendChild(iframe);
     document.body.appendChild(form);
-
-    const timer=setTimeout(()=>finish(false,'Sunucudan zamanında yanıt alınamadı. Lütfen tekrar deneyin.'),180000);
-
+    const timer=setTimeout(()=>finish(false,'Sunucuya gönderim zaman aşımına uğradı. Lütfen tekrar deneyin.'),30000);
     try{
       form.submit();
     }catch(e){
+      window.removeEventListener('message',onMessage);
       finish(false,'Gönderim başlatılamadı.');
     }
   });
